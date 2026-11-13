@@ -13,7 +13,7 @@ any selected country**, using live market and reference data.
   | Statutory corporate tax rates | OECD Corporate Tax Statistics (combined central + sub-central statutory rate, latest year), read from the OECD Data Explorer API, dataset `DSD_TAX_CIT@DF_CIT` |
   | 10-year government bond yields | [Trading Economics](https://tradingeconomics.com/bonds) – scraped (no API key) |
 - **User controls:** industry, target country, equity risk premium, target debt share, U.S. vs. foreign
-  project tax rate switch, exact vs. additive currency conversion.
+  and a U.S. vs. foreign project tax rate switch.
 - **Manual overrides** for unlevered beta, both corporate tax rates, the USD BBB spread and both 10-year
   yields. The foreign-currency BBB spread can be overridden; when the override is off, the app shows the
   auto-calculated spread.
@@ -26,21 +26,24 @@ any selected country**, using live market and reference data.
 
 ## Method
 
+The formulas follow the course packet (Rebelo, 2026, "Designing cost of capital app"). An asterisk denotes
+the foreign currency; d is the target debt share D/(D + E) and τ the project tax rate.
+
 | Step | Formula |
 |---|---|
-| Debt-to-equity | D/E = w<sub>D</sub> / (1 − w<sub>D</sub>) |
-| Levered beta (Hamada) | β<sub>L</sub> = β<sub>U</sub> [1 + (1 − t) D/E] |
-| USD cost of equity | k<sub>E</sub><sup>$</sup> = y<sub>US</sub> + β<sub>L</sub> × ERP |
-| USD cost of debt | k<sub>D</sub><sup>$</sup> = y<sub>US</sub> + s<sub>BBB</sub> |
-| Conversion to foreign currency (exact) | 1 + k<sup>FC</sup> = (1 + k<sup>$</sup>)(1 + y<sub>F</sub>)/(1 + y<sub>US</sub>) |
-| Conversion (additive option) | k<sup>FC</sup> = k<sup>$</sup> + (y<sub>F</sub> − y<sub>US</sub>) |
-| Foreign cost of debt | k<sub>D</sub><sup>FC</sup> = y<sub>F</sub> + s<sup>FC</sup>; auto s<sup>FC</sup> = converted k<sub>D</sub><sup>$</sup> − y<sub>F</sub>, or a manual override |
-| WACC (both currencies) | (1 − w<sub>D</sub>) k<sub>E</sub> + w<sub>D</sub> k<sub>D</sub> (1 − t) |
+| Debt-to-equity | D/E = d / (1 − d) |
+| Relevered beta | β<sub>E</sub> = β<sub>U</sub> [1 + (1 − τ) D/E] |
+| USD cost of equity (CAPM) | R<sub>e</sub> = R<sub>f</sub> + β<sub>E</sub> × ERP |
+| USD borrowing cost | R<sub>d</sub> = R<sub>f</sub> + s |
+| Conversion factor | F = (1 + R<sub>f</sub>*) / (1 + R<sub>f</sub>) |
+| Foreign cost of equity | 1 + R<sub>e</sub>* = (1 + R<sub>e</sub>) × F |
+| Foreign spread (default, overridable) | s* = s × F |
+| Foreign borrowing cost | R<sub>d</sub>* = R<sub>f</sub>* + s* |
+| WACC (each currency) | (1 − d) R<sub>e</sub> + d R<sub>d</sub> (1 − τ) |
 
-The same tax rate, debt share and ERP are used in both currencies.
-
-> If the formulas given in class differ from these, edit `cost_of_capital()` in `app.py`; every table,
-> chart, download and check uses that single function.
+Government 10-year yields are the risk-free proxies. The same tax rate, debt share and ERP are used in both
+currencies, and there is no separate country equity premium. All formulas live in `cost_of_capital()` in
+`app.py`.
 
 ## Verification checks (built into the app)
 
@@ -48,7 +51,8 @@ The same tax rate, debt share and ERP are used in both currencies.
 2. Zero debt ⇒ WACC equals cost of equity in both currencies.
 3. Overriding the foreign-currency spread leaves all USD results unchanged.
 
-The **Verification** tab also shows each calculation step with the actual numbers so you can reproduce one
+The **Verification** tab also reproduces the course packet's Colombia example (WACC 8.5265% in USD and
+16.0670% in COP) and shows each calculation step with the actual numbers so you can reproduce one
 example independently in a spreadsheet or calculator.
 
 ## Run locally
