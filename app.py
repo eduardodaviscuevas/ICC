@@ -299,17 +299,18 @@ def safe(fn, *args):
 # ---------------------------------------------------------------------------
 # Finance
 # ---------------------------------------------------------------------------
-def cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, spread_f_override=None, method="exact"):
+def cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, spread_f_override=None):
     """All rates in decimals. Returns a dict with USD and foreign-currency (FC) results.
+    Follows the course packet (Rebelo, 2026, "Designing cost of capital app"):
 
-    Levered beta (Hamada):     bL = bU * [1 + (1 - t) * D/E],   D/E = wd / (1 - wd)
-    USD cost of equity:        ke$ = y$ + bL * ERP
-    USD cost of debt:          kd$ = y$ + BBB spread
-    Conversion to FC (exact):  (1 + k_FC) = (1 + k$) * (1 + yF) / (1 + y$)
-    Conversion to FC (additive): k_FC = k$ + (yF - y$)
-    FC cost of debt:           kdF = yF + sF, where sF is the implied spread from the
-                               conversion of kd$ unless overridden by the user
-    WACC:                      (1 - wd) * ke + wd * kd * (1 - t)
+    Relevered beta:            bE = bU * [1 + (1 - t) * D/E],   D/E = d / (1 - d)
+    USD cost of equity:        Re = Rf + bE * ERP
+    USD cost of debt:          Rd = Rf + s
+    Conversion factor:         F = (1 + Rf*) / (1 + Rf)
+    FC cost of equity:         1 + Re* = (1 + Re) * F
+    FC spread (default):       s* = s * F            (or a user override)
+    FC cost of debt:           Rd* = Rf* + s*
+    WACC (each currency):      (1 - d) * Re + d * Rd * (1 - t)
     """
     we = 1 - wd
     de = wd / we
@@ -319,19 +320,15 @@ def cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, spread_f_overri
     kd_usd = y_us + spread_usd
     wacc_usd = we * ke_usd + wd * kd_usd * (1 - tax)
 
-    if method == "exact":
-        conv = lambda k: (1 + k) * (1 + y_f) / (1 + y_us) - 1  # noqa: E731
-    else:
-        conv = lambda k: k + (y_f - y_us)  # noqa: E731
-
-    ke_f = conv(ke_usd)
-    spread_f_auto = conv(kd_usd) - y_f
+    factor = (1 + y_f) / (1 + y_us)
+    ke_f = (1 + ke_usd) * factor - 1
+    spread_f_auto = spread_usd * factor
     spread_f = spread_f_auto if spread_f_override is None else spread_f_override
     kd_f = y_f + spread_f
     wacc_f = we * ke_f + wd * kd_f * (1 - tax)
 
     return dict(
-        beta_u=beta_u, beta_l=beta_l, de=de, we=we, wd=wd, tax=tax, erp=erp,
+        beta_u=beta_u, beta_l=beta_l, de=de, we=we, wd=wd, tax=tax, erp=erp, factor=factor,
         y_us=y_us, y_f=y_f, spread_usd=spread_usd, spread_f_auto=spread_f_auto, spread_f=spread_f,
         ke_usd=ke_usd, kd_usd=kd_usd, kd_usd_at=kd_usd * (1 - tax), wacc_usd=wacc_usd,
         ke_f=ke_f, kd_f=kd_f, kd_f_at=kd_f * (1 - tax), wacc_f=wacc_f,
@@ -390,12 +387,6 @@ with st.sidebar:
         help="The same tax rate is used for both the USD and the foreign-currency calculations.",
     )
 
-    method = st.radio(
-        "Currency conversion", ["Exact (multiplicative)", "Additive (approximation)"], index=0,
-        help="Exact: (1+k_FC) = (1+k_USD)(1+y_F)/(1+y_US). Additive: k_FC = k_USD + (y_F − y_US).",
-    )
-    method_key = "exact" if method.startswith("Exact") else "additive"
-
 # ---- fetch yields for the two countries
 us_yield, err_us = safe(get_yield, "united-states")
 f_yield, err_f = (us_yield, err_us) if slug == "united-states" else safe(get_yield, slug)
@@ -449,7 +440,7 @@ with st.sidebar:
 tax = tax_us if tax_choice == "U.S. rate" else tax_f
 
 # Foreign BBB spread: auto unless overridden
-_auto = cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, None, method_key)
+_auto = cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, None)
 with st.sidebar:
     st.subheader(f"{ccy} BBB spread")
     spread_f_on = st.toggle(f"Override {ccy} BBB spread", value=False, key="ov_spread_f")
@@ -461,9 +452,9 @@ with st.sidebar:
     else:
         spread_f_val = None
         st.metric(f"Auto-calculated {ccy} spread", pct(_auto["spread_f_auto"], 3))
-        st.caption("Implied by converting the USD cost of debt into the foreign currency.")
+        st.caption("s* = s × (1 + Rf*) / (1 + Rf): the USD spread scaled by the currency conversion factor.")
 
-res = cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, spread_f_val, method_key)
+res = cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, spread_f_val)
 
 missing = [n for n, v in [("unlevered beta", beta_u), ("tax rate", tax), ("USD BBB spread", spread_usd),
                           ("U.S. yield", y_us), (f"{country} yield", y_f)] if pd.isna(v)]
@@ -514,14 +505,14 @@ with tab_res:
     )
     st.caption(
         f"{ccy} BBB spread is {'a manual override' if spread_f_val is not None else 'auto-calculated'}. "
-        f"Conversion method: {method}."
+        f"Conversion factor F = (1 + Rf*)/(1 + Rf) = {res['factor']:.6f}."
     )
 
 # ---- all-industry comparison
 rows = []
 for _, r in beta_table.iterrows():
     bu = beta_u if (r["Industry"] == industry and st.session_state.get("ov_beta")) else r["Unlevered beta"]
-    o = cost_of_capital(bu, tax, wd, erp, y_us, y_f, spread_usd, spread_f_val, method_key)
+    o = cost_of_capital(bu, tax, wd, erp, y_us, y_f, spread_usd, spread_f_val)
     rows.append({
         "Industry": r["Industry"], "Unlevered beta": bu, "Levered beta": o["beta_l"],
         "Cost of equity USD": o["ke_usd"], "WACC USD": o["wacc_usd"],
@@ -553,7 +544,7 @@ with tab_all:
 summary = pd.DataFrame(
     [
         ("Industry", industry), ("Target country", country), ("Foreign currency", ccy),
-        ("Conversion method", method), ("Project tax source", tax_choice),
+        ("Conversion factor (1+Rf*)/(1+Rf)", res["factor"]), ("Project tax source", tax_choice),
         ("Unlevered beta", res["beta_u"]), ("Debt share D/V", wd), ("D/E", res["de"]),
         ("Levered beta", res["beta_l"]), ("Equity risk premium", erp), ("Project tax rate", res["tax"]),
         ("U.S. 10Y yield", res["y_us"]), (f"{country} 10Y yield", res["y_f"]),
@@ -633,40 +624,43 @@ with tab_assump:
     st.subheader("Method and main assumptions")
     st.markdown(
         r"""
-**1. Levered beta (Hamada).** The industry's unlevered (asset) beta is relevered at the project's target
-capital structure using the project tax rate:
+An asterisk denotes the foreign currency; $d$ is the target debt share $D/(D+E)$ and $\tau$ the project tax rate.
 
-$$\beta_L = \beta_U\left[1 + (1-t)\frac{D}{E}\right], \qquad \frac{D}{E} = \frac{w_D}{1-w_D}$$
+**1. Relevering beta.** The industry's unlevered beta is relevered at the project's target debt share and tax
+rate (debt and the tax shield have zero beta):
 
-**2. USD costs (CAPM, U.S. investor perspective).**
+$$\beta_E = \beta_U\left[1 + (1-\tau)\frac{D}{E}\right], \qquad \frac{D}{E} = \frac{d}{1-d}$$
 
-$$k_E^{\$} = y_{US} + \beta_L \cdot ERP \qquad k_D^{\$} = y_{US} + s_{BBB}^{\$}$$
+**2. USD costs (CAPM with the U.S. 10-year yield as risk-free proxy; no separate country premium).**
 
-**3. Foreign-currency costs.** USD rates are translated into the foreign currency with the difference in
-10-year government yields (interest-rate parity / relative expected inflation):
+$$R_e = R_f + \beta_E \times ERP \qquad R_d = R_f + s$$
 
-$$\text{Exact: } 1 + k^{FC} = (1 + k^{\$})\frac{1 + y_{F}}{1 + y_{US}} \qquad
-\text{Additive: } k^{FC} = k^{\$} + (y_{F} - y_{US})$$
+**3. Converting to the foreign currency.** The Fisher equation plus relative PPP give
 
-The foreign cost of debt is $k_D^{FC} = y_F + s^{FC}$. By default the foreign spread $s^{FC}$ is the one implied
-by converting $k_D^{\$}$ ($s^{FC} = k_D^{\$,\text{converted}} - y_F$); you can override it in the sidebar.
+$$F = \frac{1 + R_f^*}{1 + R_f} \qquad 1 + R_e^* = (1 + R_e)\,F$$
 
-**4. WACC** (same weights, ERP and tax rate in both currencies):
+**4. Foreign borrowing cost.** By default the USD spread is scaled by the same factor; it can be overridden:
 
-$$WACC = (1-w_D)\,k_E + w_D\,k_D\,(1-t)$$
+$$s^* = s \times F \qquad R_d^* = R_f^* + s^*$$
+
+**5. WACC** (same $d$, $ERP$ and $\tau$ in both currencies; interest deducted in each financing currency):
+
+$$WACC = (1-d)\,R_e + d\,R_d\,(1-\tau)$$
 """
     )
     st.markdown(
         """
-**Key assumptions**
-- Damodaran's U.S. industry unlevered beta represents the project's business risk in every country.
-- The equity risk premium, target debt share and project tax rate are the same in both currencies; the tax
-  rate is the U.S. or the target-country statutory rate (sidebar switch).
-- The 10-year local-currency government yield is treated as the risk-free rate; any sovereign default risk in
-  it is passed through to the foreign-currency rates.
-- The yield differential is the market's expected currency depreciation (interest-rate parity), so USD and
-  foreign-currency values are consistent with each other.
-- Large-firm Baa2/BBB spread is the USD credit spread for the project's debt.
+**Key approximations**
+- **Risk benchmark:** risk is measured relative to the U.S. market, not the investor's portfolio or a world portfolio.
+- **Project risk:** U.S. industry betas (Damodaran) proxy for project risk; CAPM omits other priced risks.
+- **Interest rates:** 10-year government yields are risk-free proxies; they include liquidity and term premia
+  and may include sovereign default risk.
+- **Currency conversion:** equal real rates and relative PPP link the yield gap to expected depreciation.
+  Exchange-rate betas are close to zero, so there is no separate currency-risk premium.
+- **Country and credit risk:** no separate country equity premium; the large-firm Baa2/BBB spread is the USD
+  credit spread.
+- **Financing and taxes:** target leverage is constant, interest deductions are fully usable, and the same
+  tax rate (U.S. or target country, sidebar switch) applies in both currencies.
 - Overriding the foreign spread changes only the foreign-currency cost of debt and WACC; USD results do not move.
 """
     )
@@ -677,12 +671,12 @@ with tab_check:
     st.caption("These use the current sidebar inputs and recompute the model under controlled changes.")
     tol = 1e-12
 
-    eq = cost_of_capital(beta_u, tax, wd, erp, y_us, y_us, spread_usd, None, method_key)
+    eq = cost_of_capital(beta_u, tax, wd, erp, y_us, y_us, spread_usd, None)
     c1 = all(abs(eq[a] - eq[b]) < tol for a, b in [("ke_usd", "ke_f"), ("kd_usd", "kd_f"), ("wacc_usd", "wacc_f")])
-    z = cost_of_capital(beta_u, tax, 0.0, erp, y_us, y_f, spread_usd, spread_f_val, method_key)
+    z = cost_of_capital(beta_u, tax, 0.0, erp, y_us, y_f, spread_usd, spread_f_val)
     c2 = abs(z["wacc_usd"] - z["ke_usd"]) < tol and abs(z["wacc_f"] - z["ke_f"]) < tol
-    ov = cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, 0.05, method_key)
-    base = cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, None, method_key)
+    ov = cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, 0.05)
+    base = cost_of_capital(beta_u, tax, wd, erp, y_us, y_f, spread_usd, None)
     c3 = all(abs(ov[k] - base[k]) < tol for k in ("ke_usd", "kd_usd", "wacc_usd"))
 
     checks = pd.DataFrame([
@@ -696,10 +690,29 @@ with tab_check:
     checks["Pass"] = checks["Pass"].map({True: "✅ pass", False: "❌ fail"})
     st.dataframe(checks, hide_index=True, use_container_width=True)
 
+    st.markdown("#### Course packet example: Colombia")
+    st.caption("Inputs from the packet: unlevered beta 0.80, debt share 30%, tax 35%, ERP 6.5%, "
+               "U.S. yield 4.0%, Colombia yield 12.0%, USD spread 1.5 pp. Fixed inputs, independent of the sidebar.")
+    col = cost_of_capital(0.80, 0.35, 0.30, 0.065, 0.04, 0.12, 0.015, None)
+    packet = [  # (label, model key, packet value in percent; beta as a number)
+        ("Levered beta", "beta_l", 1.022857), ("Cost of equity USD", "ke_usd", 10.6486),
+        ("Pretax borrowing cost USD", "kd_usd", 5.5000), ("After-tax borrowing cost USD", "kd_usd_at", 3.5750),
+        ("WACC USD", "wacc_usd", 8.5265), ("Cost of equity COP", "ke_f", 19.1600),
+        ("COP spread", "spread_f", 1.6154), ("Pretax borrowing cost COP", "kd_f", 13.6154),
+        ("After-tax borrowing cost COP", "kd_f_at", 8.8500), ("WACC COP", "wacc_f", 16.0670),
+    ]
+    prow = []
+    for label, key, pv in packet:
+        mv = col[key] if key == "beta_l" else col[key] * 100
+        ok = abs(mv - pv) < 0.00051 if key != "beta_l" else abs(mv - pv) < 5e-7
+        prow.append([label, f"{pv:.6f}" if key == "beta_l" else f"{pv:.4f}%",
+                     f"{mv:.6f}" if key == "beta_l" else f"{mv:.4f}%", "✅ match" if ok else "❌ differs"])
+    st.dataframe(pd.DataFrame(prow, columns=["Item", "Packet", "App", "Status"]),
+                 hide_index=True, use_container_width=True)
+
     st.markdown("#### Worked example with the current inputs (replicate in a spreadsheet)")
     r = res
-    conv_txt = (f"(1 + {pct(r['ke_usd'], 4)}) × (1 + {pct(r['y_f'], 4)}) / (1 + {pct(r['y_us'], 4)}) − 1"
-                if method_key == "exact" else f"{pct(r['ke_usd'], 4)} + ({pct(r['y_f'], 4)} − {pct(r['y_us'], 4)})")
+    conv_txt = f"(1 + {pct(r['ke_usd'], 4)}) × (1 + {pct(r['y_f'], 4)}) / (1 + {pct(r['y_us'], 4)}) − 1"
     steps = pd.DataFrame([
         ["D/E", f"{wd:.4f} / (1 − {wd:.4f})", f"{r['de']:.6f}"],
         ["Levered beta", f"{r['beta_u']:.4f} × [1 + (1 − {r['tax']:.4f}) × {r['de']:.6f}]", f"{r['beta_l']:.6f}"],
@@ -708,7 +721,8 @@ with tab_check:
         ["WACC USD", f"{1 - wd:.2f} × {pct(r['ke_usd'], 4)} + {wd:.2f} × {pct(r['kd_usd'], 4)} × (1 − {r['tax']:.4f})",
          pct(r["wacc_usd"], 4)],
         [f"Cost of equity {fc_lbl}", conv_txt, pct(r["ke_f"], 4)],
-        [f"{ccy} BBB spread", "override" if spread_f_val is not None else "converted USD cost of debt − y_F",
+        [f"{ccy} BBB spread", "override" if spread_f_val is not None else
+         f"{pct(r['spread_usd'], 4)} × (1 + {pct(r['y_f'], 4)}) / (1 + {pct(r['y_us'], 4)})",
          pct(r["spread_f"], 4)],
         [f"Cost of debt {fc_lbl}", f"{pct(r['y_f'], 4)} + {pct(r['spread_f'], 4)}", pct(r["kd_f"], 4)],
         [f"WACC {fc_lbl}", f"{1 - wd:.2f} × {pct(r['ke_f'], 4)} + {wd:.2f} × {pct(r['kd_f'], 4)} × (1 − {r['tax']:.4f})",
